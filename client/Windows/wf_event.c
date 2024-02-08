@@ -50,9 +50,17 @@ static BOOL wf_scale_mouse_event_ex(wfContext* wfc, rdpInput* input, UINT16 flag
 static BOOL g_flipping_in;
 static BOOL g_flipping_out;
 
-static BOOL alt_ctrl_down()
+static BOOL g_keystates[256] = { 0 };
+
+static BOOL ctrl_down(void)
 {
-	return ((GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000));
+	return g_keystates[VK_CONTROL] || g_keystates[VK_LCONTROL] || g_keystates[VK_RCONTROL];
+}
+
+static BOOL alt_ctrl_down(void)
+{
+	const BOOL altDown = g_keystates[VK_MENU] || g_keystates[VK_LMENU] || g_keystates[VK_RMENU];
+	return altDown && ctrl_down();
 }
 
 LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
@@ -87,18 +95,31 @@ LRESULT CALLBACK wf_ll_kbd_proc(int nCode, WPARAM wParam, LPARAM lParam)
 
 				input = wfc->context.input;
 				rdp_scancode = MAKE_RDP_SCANCODE((BYTE)p->scanCode, p->flags & LLKHF_EXTENDED);
+				
+				switch (wParam)
+				{
+					case WM_KEYDOWN:
+					case WM_SYSKEYDOWN:
+						g_keystates[p->vkCode & 0xFF] = TRUE;
+						break;
+					case WM_KEYUP:
+					case WM_SYSKEYUP:
+					default:
+						g_keystates[p->vkCode & 0xFF] = FALSE;
+						break;
+				}
 				DEBUG_KBD("keydown %d scanCode 0x%08lX flags 0x%08lX vkCode 0x%08lX",
 				          (wParam == WM_KEYDOWN), p->scanCode, p->flags, p->vkCode);
-
-				if (wfc->fullscreen_toggle &&
-				    ((p->vkCode == VK_RETURN) || (p->vkCode == VK_CANCEL)) &&
-				    (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
-				    (GetAsyncKeyState(VK_MENU) & 0x8000)) /* could also use flags & LLKHF_ALTDOWN */
+				
+				if (wfc->fullscreen_toggle && (p->vkCode == VK_RETURN || p->vkCode == VK_CANCEL))
 				{
-					if (wParam == WM_KEYDOWN)
+					if (alt_ctrl_down())
 					{
-						wf_toggle_fullscreen(wfc);
-						return 1;
+						if (wParam == WM_KEYDOWN)
+						{
+							wf_toggle_fullscreen(wfc);
+							return 1;
+						}
 					}
 				}
 
