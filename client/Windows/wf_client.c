@@ -57,6 +57,10 @@
 #include "resource.h"
 
 #define TAG CLIENT_TAG("windows")
+#define MAX_MONITOR_WIDTH (4096)
+#define MAX_MONITOR_HEIGHT (2048)
+#define MIN_MONITOR_WIDTH (64)
+#define MIN_MONITOR_HEIGHT (64)
 
 static BOOL wf_create_console(void)
 {
@@ -200,6 +204,80 @@ static BOOL wf_desktop_resize(rdpContext* context)
 	return TRUE;
 }
 
+BOOL wf_monitor_for_fullscreen(rdpSettings* settings, UINT32 monitor_id)
+{
+	BOOL monitor_for_fullscreen = FALSE;
+	const UINT32* monitor_ids =
+	    (const UINT32*)freerdp_settings_get_pointer(settings, FreeRDP_MonitorIds);
+	UINT32 num_monitor_ids = freerdp_settings_get_uint32(settings, FreeRDP_NumMonitorIds);
+
+	if ((monitor_ids == NULL) || (num_monitor_ids == 0))
+	{
+		monitor_for_fullscreen = TRUE;
+	}
+	else
+	{
+		for (UINT32 i = 0; i < num_monitor_ids && !monitor_for_fullscreen; ++i)
+		{
+			if (monitor_ids[i] == monitor_id)
+			{
+				monitor_for_fullscreen = TRUE;
+			}
+		}
+	}
+	return monitor_for_fullscreen;
+}
+
+BOOL wf_monitor_enumproc(HMONITOR monitor_handle, HDC unnamedParam2, LPRECT rect, LPARAM dwData)
+{
+	wfMultiMonCtx* multiMonCtx = (wfMultiMonCtx*)dwData;
+	multiMonCtx->org_monitor_idx++;
+	int x = rect->left;
+	int y = rect->top;
+	int height = rect->bottom - rect->top;
+	int width = rect->right - rect->left;
+	bool primary = FALSE;
+
+	MONITORINFO mon_info;
+	mon_info.cbSize = sizeof(MONITORINFO);
+	if (!GetMonitorInfo(monitor_handle, &mon_info))
+	{
+		WLog_VRB(TAG,
+		         "Could not determin if monitor is primary for monitor %i wxh: %i x %i @ (%i,%i)",
+		         multiMonCtx->org_monitor_idx, width, height, x, y);
+	}
+	primary = (mon_info.dwFlags & MONITORINFOF_PRIMARY);
+
+	WLog_INFO(TAG, "%i. Monitor wxh: %i x %i @ (%i,%i), %s, %i", multiMonCtx->org_monitor_idx,
+	          width, height, x, y, primary ? "(*)" : "( )");
+
+	if (wf_monitor_for_fullscreen(multiMonCtx->rdp_settings, multiMonCtx->org_monitor_idx))
+	{
+		rdpMonitor* monitor = &(multiMonCtx->rdp_settings->MonitorDefArray[multiMonCtx->rdp_monitor_idx]);
+		monitor->x = x;
+		monitor->y = y;
+		monitor->width = width;
+		monitor->height = height;
+		monitor->orig_screen = multiMonCtx->org_monitor_idx;
+		monitor->is_primary = primary;
+		multiMonCtx->rdp_monitor_idx++;
+		multiMonCtx->rdp_settings->MonitorDefArraySize=multiMonCtx->rdp_monitor_idx;
+	}
+	return TRUE;
+}
+
+static BOOL wf_multimon_settings(rdpSettings* settings)
+{
+	wfMultiMonCtx multiMonCtx;
+	multiMonCtx.org_monitor_idx = 0;
+	multiMonCtx.rdp_monitor_idx = 0;
+	multiMonCtx.rdp_settings = settings;
+	EnumDisplayMonitors(NULL, NULL, wf_monitor_enumproc, (LPARAM)&multiMonCtx);
+	freerdp_settings_set_uint32(settings, FreeRDP_MonitorCount, multiMonCtx.rdp_monitor_idx);
+
+	return TRUE;
+}
+
 static BOOL wf_pre_connect(freerdp* instance)
 {
 	UINT32 rc;
@@ -232,10 +310,12 @@ static BOOL wf_pre_connect(freerdp* instance)
 
 	if (wfc->fullscreen)
 	{
-		if (settings->UseMultimon)
+
+		if (settings->UseMultimon && (settings->MonitorCount > 1 || settings->MonitorCount == 0))
 		{
 			desktopWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
 			desktopHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+			wf_multimon_settings(settings);
 		}
 		else
 		{
@@ -244,33 +324,53 @@ static BOOL wf_pre_connect(freerdp* instance)
 		}
 	}
 
+
 	/* FIXME: desktopWidth has a limitation that it should be divisible by 4,
 	 *        otherwise the screen will crash when connecting to an XP desktop.*/
 	desktopWidth = (desktopWidth + 3) & (~3);
 
 	if (desktopWidth != settings->DesktopWidth)
 	{
-		freerdp_set_param_uint32(settings, FreeRDP_DesktopWidth, desktopWidth);
+		freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, desktopWidth);
 	}
 
 	if (desktopHeight != settings->DesktopHeight)
 	{
-		freerdp_set_param_uint32(settings, FreeRDP_DesktopHeight, desktopHeight);
+		freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, desktopHeight);
 	}
 
-	if ((settings->DesktopWidth < 64) || (settings->DesktopHeight < 64) ||
-	    (settings->DesktopWidth > 4096) || (settings->DesktopHeight > 4096))
+	if (settings->MonitorCount > 1) // multimon
 	{
-		WLog_ERR(TAG, "invalid dimensions %lu %lu", settings->DesktopWidth,
-		         settings->DesktopHeight);
-		return FALSE;
+		for(UINT32 i=0; i<settings->MonitorDefArraySize; ++i)
+		{
+			rdpMonitor* monitor = &(settings->MonitorDefArray[i]);
+			if ((monitor->width < MIN_MONITOR_WIDTH ) || (monitor->height < MIN_MONITOR_HEIGHT) ||
+			(monitor->width > MAX_MONITOR_WIDTH) || (monitor->height > MAX_MONITOR_HEIGHT))
+		{
+			WLog_INFO(TAG, "invalid dimensions for monitor %i: %lu %lu", i, monitor->width,
+					monitor->height);
+			return FALSE;
+		}
+		}
 	}
+	else // single monitor/window
+	{ 
+		if ((settings->DesktopWidth < MIN_MONITOR_WIDTH) || (settings->DesktopHeight < MIN_MONITOR_HEIGHT) ||
+			(settings->DesktopWidth > MAX_MONITOR_WIDTH) || (settings->DesktopHeight > MAX_MONITOR_HEIGHT))
+		{
+			WLog_INFO(TAG, "invalid dimensions %lu %lu", settings->DesktopWidth,
+					settings->DesktopHeight);
+			return FALSE;
+		}
+	}
+	
 
+	WLog_INFO(TAG, "Desktop wxh: %i x %i", desktopWidth, desktopHeight);
 	if (!freerdp_client_load_addins(context->channels, instance->settings))
 		return -1;
 
 	rc = freerdp_keyboard_init(freerdp_settings_get_uint32(settings, FreeRDP_KeyboardLayout));
-	freerdp_set_param_uint32(settings, FreeRDP_KeyboardLayout, rc);
+	freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, rc);
 	PubSub_SubscribeChannelConnected(instance->context->pubSub, wf_OnChannelConnectedEventHandler);
 	PubSub_SubscribeChannelDisconnected(instance->context->pubSub,
 	                                    wf_OnChannelDisconnectedEventHandler);
@@ -415,6 +515,9 @@ static BOOL wf_post_connect(freerdp* instance)
 	}
 
 	wfc->floatbar = wf_floatbar_new(wfc, wfc->hInstance, settings->Floatbar);
+	WLog_INFO(TAG, "Floatbar parsed settings: %u",
+	          settings->Floatbar);
+	WLog_INFO(TAG, "Floatbar object: 0x%x", wfc->floatbar);
 	return TRUE;
 }
 

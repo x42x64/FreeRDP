@@ -33,6 +33,7 @@
 #include <freerdp/gdi/region.h>
 #include <freerdp/cache/cache.h>
 #include <freerdp/codec/color.h>
+#include <freerdp/settings.h>
 
 #include <freerdp/client/rail.h>
 #include <freerdp/channels/channels.h>
@@ -55,6 +56,12 @@ extern "C"
 // System menu constants
 #define SYSCOMMAND_ID_SMARTSIZING 1000
 
+	typedef struct  {
+		int org_monitor_idx;
+		int rdp_monitor_idx;
+		rdpSettings* rdp_settings;
+	} wfMultiMonCtx;
+	
 	struct wf_bitmap
 	{
 		rdpBitmap _bitmap;
